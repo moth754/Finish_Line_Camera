@@ -47,7 +47,9 @@ from dataclasses import dataclass, field
 import numpy as np
 import simplejpeg  # fast JPEG encoder, already a dependency of picamera2
 
+from . import cameras as camera_inventory
 from . import config
+from . import v4l2
 from .motion_detector import MotionDetector, MotionResult
 from .settings import Settings
 
@@ -211,6 +213,15 @@ class _BaseCamera:
         self.mode_key = mode["key"]
         self.record_size = (int(mode["size"][0]), int(mode["size"][1]))
         self.fps = int(mode["fps"])
+        self._apply_preview_size()
+
+    def _apply_preview_size(self):
+        """Derive the preview and motion-analysis geometry from record_size.
+
+        Split out from _apply_mode_from_settings because a USB camera only
+        learns its true recording size when the device is opened, and has to
+        redo this afterwards.
+        """
         pw, ph = self._settings.preview_size()
         # The preview stream can't be bigger than the recording stream.
         if pw > self.record_size[0] or ph > self.record_size[1]:
@@ -219,10 +230,17 @@ class _BaseCamera:
         # Motion analysis works on the preview luminance subsampled to <=640 px.
         self._gray_step = max(1, math.ceil(pw / config.MOTION_ANALYSIS_MAX_WIDTH))
 
+    # Set by the factory so the UI can show which source is live.
+    camera_id = "mock"
+    camera_name = "Mock camera"
+    supports_focus = False
+
     def describe(self) -> dict:
         return {"mode": self.mode_key, "record_size": list(self.record_size),
                 "fps": self.fps, "preview_size": list(self.preview_size),
                 "camera_type": type(self).__name__,
+                "camera_id": self.camera_id, "camera_name": self.camera_name,
+                "supports_focus": self.supports_focus,
                 "loop_fps": self.loop_fps(), "error": self._last_error}
 
     # -- focus (settable at runtime from the web UI) ------------------------
@@ -379,6 +397,8 @@ class _BaseCamera:
 class Picamera2Backend(_BaseCamera):
     """Drives a real Camera Module 3 through the Picamera2 library."""
 
+    supports_focus = True       # the Module 3 has a motorised lens
+
     def __init__(self, settings: Settings, motion: MotionDetector):
         super().__init__(settings, motion)
         self._picam2 = None
@@ -467,6 +487,178 @@ class Picamera2Backend(_BaseCamera):
             except Exception:
                 pass
             self._picam2 = None
+
+
+# ---------------------------------------------------------------------------
+# USB / V4L2 camera (webcams, capture cards, virtual devices)
+# ---------------------------------------------------------------------------
+
+class UsbCameraBackend(_BaseCamera):
+    """
+    Drives any V4L2 camera through OpenCV.
+
+    Differences from the Pi camera that matter:
+
+    * **One stream, not two.**  A webcam hands over a single image, so the
+      preview is produced here by downscaling each frame rather than by a
+      second hardware stream.  That costs a resize per frame, which is cheap
+      next to the H.264 encode.
+
+    * **The mode comes from the device.**  A webcam cannot be asked for
+      2304x1296 at 50 fps because a Camera Module can manage it, so the modes
+      offered in Settings are enumerated from the hardware (see v4l2.py) and
+      whatever the driver actually grants is read back after opening.
+
+    * **Frame times are arrival times.**  The Pi backend timestamps a frame
+      from the sensor's own exposure clock.  A UVC webcam gives no such clock
+      through OpenCV, so a frame is stamped when it arrives here, which
+      includes USB transfer and MJPEG decode.  Expect a consistent offset of
+      roughly one frame period, not sensor-exact finish times.
+
+    * **No focus control.**  Fixed-focus is the norm for webcams and OpenCV
+      exposes no reliable lens control, so the focus panel does not apply.
+    """
+
+    supports_focus = False
+
+    def __init__(self, settings: Settings, motion: MotionDetector,
+                 device: str, name: str = ""):
+        # Set before super().__init__: the base constructor calls
+        # _apply_mode_from_settings(), which needs to know the device.
+        self._device = device
+        self.camera_name = name or device
+        self.camera_id = f"usb:{device}"
+        self._fourcc = None
+        self._cap = None
+        self._cv2 = None
+        super().__init__(settings, motion)
+
+    # -- mode selection -----------------------------------------------------
+
+    @staticmethod
+    def _parse_mode_key(key: str) -> dict | None:
+        """Turn 'MJPG:1280x720@30' back into its parts (no device needed)."""
+        try:
+            fourcc, _, geometry = key.partition(":")
+            size, _, fps = geometry.partition("@")
+            w, _, h = size.partition("x")
+            return {"key": key, "fourcc": fourcc or None, "width": int(w),
+                    "height": int(h), "fps": int(round(float(fps)))}
+        except (ValueError, AttributeError):
+            return None
+
+    def _apply_mode_from_settings(self):
+        want = self._settings.get("usb_mode")
+        available = v4l2.list_modes(self._device) if self._device else []
+
+        chosen = next((m for m in available if m["key"] == want), None)
+        if chosen is None:
+            # The stored mode is not on offer: keep its geometry if it parses
+            # (the device may simply not be enumerable), else take the best
+            # mode the device does advertise, else a universally safe default.
+            chosen = self._parse_mode_key(want) if want else None
+            if chosen is None:
+                chosen = available[0] if available else {
+                    "key": "MJPG:1280x720@30", "fourcc": "MJPG",
+                    "width": 1280, "height": 720, "fps": 30}
+
+        self.mode_key = chosen["key"]
+        self._fourcc = chosen.get("fourcc")
+        # YUV420 needs even dimensions in both axes.
+        self.record_size = (int(chosen["width"]) & ~1, int(chosen["height"]) & ~1)
+        self.fps = max(1, int(chosen["fps"]))
+        self._apply_preview_size()
+
+    # -- lifecycle ----------------------------------------------------------
+
+    def _open(self):
+        try:
+            import cv2
+        except ImportError as exc:      # pragma: no cover - depends on install
+            raise RuntimeError(
+                "USB cameras need OpenCV: install python3-opencv (apt) or "
+                "opencv-python-headless (pip)") from exc
+        self._cv2 = cv2
+
+        cap = cv2.VideoCapture(self._device, cv2.CAP_V4L2)
+        if not cap.isOpened():
+            raise RuntimeError(f"could not open {self._device} "
+                               f"(in use by another program, or not a camera?)")
+
+        # Order matters: the pixel format has to be set before the size, or a
+        # driver may report the size for the wrong format.  MJPEG is what lets
+        # a USB 2.0 webcam reach 1080p at a usable rate.
+        if self._fourcc:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self._fourcc))
+        want_w, want_h = self.record_size
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, want_w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, want_h)
+        cap.set(cv2.CAP_PROP_FPS, self.fps)
+        # Keep only the newest frame: a queue of stale frames would put the
+        # finish line in the past.
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
+
+        # Believe the device, not the request.
+        actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or want_w
+        actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or want_h
+        actual_fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+        self.record_size = (actual_w & ~1, actual_h & ~1)
+        if actual_fps and 0 < actual_fps < 1000:
+            self.fps = int(round(actual_fps))
+        self._apply_preview_size()
+
+        if (actual_w, actual_h) != (want_w, want_h):
+            print(f"[camera] {self._device}: asked for {want_w}x{want_h}, "
+                  f"got {actual_w}x{actual_h}")
+        self._cap = cap
+        print(f"[camera] USB {self.camera_name} ({self._device}): "
+              f"{self.record_size[0]}x{self.record_size[1]} @ {self.fps} fps"
+              f"{' ' + self._fourcc if self._fourcc else ''}, "
+              f"preview {self.preview_size[0]}x{self.preview_size[1]}")
+
+        # Prime the pipeline; the first read on a webcam is often slow or empty.
+        for _ in range(5):
+            if cap.read()[0]:
+                break
+            time.sleep(0.1)
+
+    def _grab(self, want_main: bool):
+        cv2 = self._cv2
+        ok, bgr = self._cap.read()
+        # Stamp as soon as the frame is in hand - see the class docstring.
+        epoch = time.time()
+        if not ok or bgr is None:
+            raise RuntimeError(f"no frame from {self._device}")
+
+        if config.USB_HFLIP and config.USB_VFLIP:
+            bgr = cv2.flip(bgr, -1)
+        elif config.USB_HFLIP:
+            bgr = cv2.flip(bgr, 1)
+        elif config.USB_VFLIP:
+            bgr = cv2.flip(bgr, 0)
+
+        w, h = self.record_size
+        if bgr.shape[1] != w or bgr.shape[0] != h:
+            bgr = cv2.resize(bgr, (w, h), interpolation=cv2.INTER_AREA)
+
+        # COLOR_BGR2YUV_I420 produces exactly the tight (h*3/2, w) YUV420
+        # layout the recorder and the JPEG encoder expect - no repacking.
+        pw, ph = self.preview_size
+        small = cv2.resize(bgr, (pw, ph), interpolation=cv2.INTER_AREA)
+        lores = cv2.cvtColor(small, cv2.COLOR_BGR2YUV_I420)
+        main = cv2.cvtColor(bgr, cv2.COLOR_BGR2YUV_I420) if want_main else None
+        return lores, main, epoch
+
+    def _close(self):
+        if self._cap is not None:
+            try:
+                self._cap.release()
+            except Exception:
+                pass
+            self._cap = None
 
 
 # ---------------------------------------------------------------------------
@@ -559,32 +751,122 @@ class MockCameraBackend(_BaseCamera):
 
 
 # ---------------------------------------------------------------------------
-# Factory
+# Factory + the handle that lets the camera be swapped at runtime
 # ---------------------------------------------------------------------------
 
-def create_camera(settings: Settings, motion: MotionDetector) -> _BaseCamera:
+def _build_backend(settings: Settings, motion: MotionDetector) -> _BaseCamera:
     """
-    Build the camera backend dictated by config.USE_MOCK_CAMERA.
+    Construct the backend for the camera currently chosen in Settings.
 
-    "auto" tries the real camera and quietly falls back to the mock if Picamera2
-    or the hardware is unavailable, so the program always starts.
+    config.USE_MOCK_CAMERA still wins when it is set to a hard True/False, so
+    an existing install that pinned it keeps behaving exactly as before.
+    Otherwise the "camera_id" setting decides, with "auto" meaning "a Pi camera
+    if one is attached, else a USB camera, else the mock".
     """
-    setting = config.USE_MOCK_CAMERA
-
-    if setting is True:
-        print("[camera] using MOCK camera (forced by config)")
+    if config.USE_MOCK_CAMERA is True:
+        print("[camera] using MOCK camera (forced by config.USE_MOCK_CAMERA)")
         return MockCameraBackend(settings, motion)
 
-    if setting is False:
-        print("[camera] using REAL Picamera2 camera (forced by config)")
-        return Picamera2Backend(settings, motion)
-
     try:
-        from picamera2 import Picamera2
-        if Picamera2.global_camera_info():
-            print("[camera] real camera detected - using Picamera2")
-            return Picamera2Backend(settings, motion)
-        print("[camera] no camera detected - falling back to MOCK camera")
-    except Exception as exc:
-        print(f"[camera] Picamera2 unavailable ({exc}) - using MOCK camera")
-    return MockCameraBackend(settings, motion)
+        wanted = settings.get("camera_id")
+    except Exception:
+        wanted = camera_inventory.AUTO
+
+    if config.USE_MOCK_CAMERA is False and wanted == camera_inventory.MOCK:
+        wanted = camera_inventory.AUTO      # config forbids the mock
+
+    resolved, entry = camera_inventory.resolve(wanted)
+    if resolved != wanted and wanted not in ("", camera_inventory.AUTO):
+        print(f"[camera] '{wanted}' is not available - falling back to '{resolved}'")
+
+    if entry is None:
+        if resolved == camera_inventory.MOCK and wanted == camera_inventory.MOCK:
+            print("[camera] using MOCK camera (chosen in Settings)")
+        else:
+            print("[camera] no camera detected - using MOCK camera")
+        return MockCameraBackend(settings, motion)
+
+    if entry["kind"] == "usb":
+        print(f"[camera] using USB camera {entry['name']} ({entry['device']})")
+        return UsbCameraBackend(settings, motion, entry["device"], entry["name"])
+
+    print(f"[camera] using Pi camera {entry['name']} ({resolved})")
+    cam = Picamera2Backend(settings, motion)
+    cam.camera_id = resolved
+    cam.camera_name = entry["name"]
+    return cam
+
+
+class Camera:
+    """
+    A stable handle around whichever backend is live.
+
+    The recorder, the extractor and the web app all hold on to the camera for
+    the lifetime of the process, but the user is allowed to switch between the
+    Pi camera, a USB camera and the mock from the Settings tab.  This handle
+    owns the current backend and replaces it on demand, so nothing else has to
+    care that the object underneath changed.
+
+    Anything not defined here is forwarded to the active backend, so the whole
+    existing camera API (get_latest, capture_main, set_sink, focus, ...) keeps
+    working unchanged.
+    """
+
+    def __init__(self, settings: Settings, motion: MotionDetector):
+        self._settings = settings
+        self._motion = motion
+        self._impl = _build_backend(settings, motion)
+        self._started = False
+
+    # Forward everything else to the live backend.
+    def __getattr__(self, name):
+        impl = self.__dict__.get("_impl")
+        if impl is None:
+            raise AttributeError(name)
+        return getattr(impl, name)
+
+    # -- lifecycle ----------------------------------------------------------
+
+    def start(self):
+        self._impl.start()
+        self._started = True
+
+    def stop(self):
+        self._impl.stop()
+        self._started = False
+
+    def reconfigure(self):
+        """
+        Re-open the camera with the current settings.
+
+        If the *chosen camera* changed, the backend is rebuilt; otherwise this
+        is the existing mode / preview-size restart.  Refused while recording,
+        because swapping the source mid-file would corrupt the segment.
+        """
+        if self._impl.has_sink():
+            raise RuntimeError("cannot change the camera while recording")
+
+        wanted, _ = camera_inventory.resolve(self._settings.get("camera_id"))
+        if wanted == getattr(self._impl, "camera_id", None):
+            self._impl.reconfigure()
+            return
+
+        print(f"[camera] switching to {wanted} ...")
+        if self._started:
+            self._impl.stop()
+        self._motion.reset()
+        self._impl = _build_backend(self._settings, self._motion)
+        if self._started:
+            self._impl.start()
+
+    def describe(self) -> dict:
+        # Deliberately just the live backend's own description: /api/status
+        # calls this every second, and enumerating V4L2 devices here would
+        # mean opening every /dev/video* node on the machine once a second.
+        # The camera list is served separately by /api/cameras.
+        return self._impl.describe()
+
+
+def create_camera(settings: Settings, motion: MotionDetector) -> Camera:
+    """Build the camera handle for the source chosen in Settings."""
+    return Camera(settings, motion)

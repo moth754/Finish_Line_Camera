@@ -40,8 +40,8 @@ import time
 from flask import (Flask, Response, abort, jsonify, render_template, request,
                    send_from_directory)
 
-from . import config, database
-from .camera_manager import _BaseCamera, encode_yuv420_jpeg
+from . import cameras, config, database
+from .camera_manager import Camera, encode_yuv420_jpeg
 from .extractor import Extractor, decode_frame_at
 from .motion_detector import MotionDetector
 from .ocr_service import OcrService
@@ -49,7 +49,7 @@ from .recorder import Recorder
 from .settings import Settings
 
 
-def create_app(camera: _BaseCamera, motion: MotionDetector, recorder: Recorder,
+def create_app(camera: Camera, motion: MotionDetector, recorder: Recorder,
                ocr: OcrService, extractor: Extractor, settings: Settings) -> Flask:
     app = Flask(__name__)
     app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
@@ -323,16 +323,51 @@ def create_app(camera: _BaseCamera, motion: MotionDetector, recorder: Recorder,
     # -- settings --------------------------------------------------------------
 
     def _settings_payload():
-        modes = [{"key": k, **{kk: (list(vv) if isinstance(vv, tuple) else vv)
-                              for kk, vv in v.items()}}
-                 for k, v in config.RECORD_MODES.items()]
+        """
+        Everything the Settings tab needs, including which camera is live and
+        which modes the *selected* camera can actually offer.
+
+        A USB camera reports its own modes, because the Raspberry Pi presets
+        are meaningless to a webcam; a Pi camera uses config.RECORD_MODES.
+        """
         cam = camera.describe()
-        return {"settings": settings.all(), "modes": modes,
+        chosen = settings.get("camera_id")
+        resolved, _entry = cameras.resolve(chosen)
+
+        device_modes = cameras.modes_for(resolved)
+        if device_modes is not None:
+            modes = device_modes
+            mode_setting = "usb_mode"
+        else:
+            modes = [{"key": k, **{kk: (list(vv) if isinstance(vv, tuple) else vv)
+                                   for kk, vv in v.items()}}
+                     for k, v in config.RECORD_MODES.items()]
+            mode_setting = "record_mode"
+        wanted_mode = settings.get(mode_setting)
+
+        # "Apply" is only needed when the live camera differs from the saved
+        # choice in some way the user can see.
+        preview_ok = (cam["preview_size"][0] == settings.get("preview_width")
+                      or cam["preview_size"][0] == cam["record_size"][0])
+        matches = (cam.get("camera_id") == resolved
+                   and cam["mode"] == wanted_mode
+                   and preview_ok)
+
+        return {"settings": settings.all(),
+                "modes": modes,
+                "mode_setting": mode_setting,
+                "wanted_mode": wanted_mode,
+                "cameras": cameras.list_cameras(),
+                "resolved_camera": resolved,
                 "camera": cam,
-                "camera_matches": (cam["mode"] == settings.get("record_mode")
-                                   and cam["preview_size"][0] == settings.get("preview_width")
-                                   or (cam["preview_size"][0] == cam["record_size"][0]
-                                       and cam["mode"] == settings.get("record_mode")))}
+                "camera_matches": matches}
+
+    @app.route("/api/cameras")
+    def api_cameras():
+        """Re-scan for cameras (the Settings tab's rescan button)."""
+        return jsonify({"cameras": cameras.list_cameras(force=True),
+                        "active": camera.describe().get("camera_id"),
+                        "selected": settings.get("camera_id")})
 
     @app.route("/api/settings", methods=["GET"])
     def api_get_settings():
@@ -349,9 +384,9 @@ def create_app(camera: _BaseCamera, motion: MotionDetector, recorder: Recorder,
 
     @app.route("/api/camera/apply", methods=["POST"])
     def api_camera_apply():
-        """Re-open the camera with the saved mode / preview size."""
+        """Re-open the camera with the saved source / mode / preview size."""
         if recorder.is_recording():
-            abort(409, "stop recording before changing the camera mode")
+            abort(409, "stop recording before changing the camera")
         try:
             camera.reconfigure()
         except Exception as exc:

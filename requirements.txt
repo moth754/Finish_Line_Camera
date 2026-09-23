@@ -30,8 +30,11 @@ Pillow>=10.0           # still images
 simplejpeg>=1.6        # fast JPEG encoding (live preview + snapshots)
 av>=11.0               # PyAV: decodes recorded video to extract frames for OCR
 
-# --- Strongly recommended ---
-opencv-python-headless>=4.8   # better OCR preprocessing; falls back to NumPy/Pillow
+# --- Required for USB cameras, recommended otherwise ---
+# OpenCV drives any V4L2 camera (webcam, capture card) and also improves the
+# OCR preprocessing.  Without it the Pi CSI camera and the mock still work, but
+# a USB camera cannot be opened at all.
+opencv-python-headless>=4.8
 
 # --- OCR backend: pick ONE (or neither, for recording/playback only) ---
 #

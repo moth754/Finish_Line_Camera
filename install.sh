@@ -9,12 +9,11 @@
 #     libcamera, PyAV, NumPy) is installed from apt, because picamera2 is built
 #     against the system NumPy and pip copies of it break the camera.
 #
-#   * Any other Linux PC (Debian/Ubuntu/Fedora/Arch/openSUSE) - there is no
-#     picamera2 backend off a Pi, so the app starts with its built-in MOCK
-#     camera.  Everything that does not need live capture still works fully:
-#     playback of recordings copied over from a Pi, the motion timeline,
-#     send-range-to-OCR, the results table and CSV export.  That makes a laptop
-#     or desktop a good machine for reviewing a race and grinding through OCR.
+#   * Any other Linux PC (Debian/Ubuntu/Fedora/Arch/openSUSE) - full system
+#     too, using a USB camera (any V4L2 device: a webcam, a capture card).
+#     Live capture, recording, playback and OCR all work.  With no camera
+#     attached the app falls back to its built-in mock, so a laptop is still
+#     useful for playing back a race copied from a Pi and running the OCR.
 #
 # Usage:
 #   ./install.sh                     # venv install, EasyOCR, systemd service
@@ -153,10 +152,10 @@ python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' \
     || die "Python 3.9 or newer is required (found $PY_VERSION)"
 
 if [ "$IS_PI" -eq 1 ]; then
-    info "Mode:     Raspberry Pi - live camera capture enabled"
+    info "Mode:     Raspberry Pi - CSI camera and USB cameras both supported"
 else
-    info "Mode:     generic Linux PC - no Pi camera stack, the app will use its"
-    info "          built-in mock camera (playback and OCR work normally)"
+    info "Mode:     generic Linux PC - USB (V4L2) cameras supported; no Pi CSI"
+    info "          camera stack.  With no camera attached, the mock is used."
 fi
 
 # ---------------------------------------------------------------------------
@@ -278,6 +277,8 @@ $PIP install --quiet --upgrade pip wheel
 # so only Flask is pip-installed there.
 step "Installing Python packages"
 
+# OpenCV is what drives a USB camera (and improves OCR preprocessing), so it
+# is part of the core set, not an extra.  On a Pi it came from apt above.
 CORE=(Flask)
 if [ "$IS_PI" -eq 0 ]; then
     CORE+=(numpy Pillow simplejpeg av opencv-python-headless)
@@ -323,6 +324,38 @@ if [ "$OCR_BACKEND" != "easyocr" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Camera device access
+# ---------------------------------------------------------------------------
+#
+# /dev/video* is owned by root:video, so the service user must be in the
+# "video" group or a USB camera cannot be opened at all.  This is the single
+# most common reason a webcam "is not detected".
+
+step "Camera device access"
+if getent group video >/dev/null 2>&1; then
+    if id -nG "$SERVICE_USER" 2>/dev/null | tr ' ' '\n' | grep -qx video; then
+        ok "$SERVICE_USER is already in the 'video' group"
+    else
+        if $SUDO usermod -aG video "$SERVICE_USER"; then
+            ok "added $SERVICE_USER to the 'video' group"
+            warn "log out and back in (or reboot) before a USB camera will open"
+            warn "in an interactive session; the systemd service picks it up on restart"
+        else
+            warn "could not add $SERVICE_USER to 'video' - USB cameras may not open"
+        fi
+    fi
+else
+    warn "no 'video' group on this system - skipping"
+fi
+
+VIDEO_NODES="$(ls /dev/video* 2>/dev/null | wc -l)"
+if [ "$VIDEO_NODES" -gt 0 ]; then
+    info "$VIDEO_NODES /dev/video* node(s) present"
+else
+    info "no /dev/video* nodes - plug a USB camera in and press Rescan in Settings"
+fi
+
+# ---------------------------------------------------------------------------
 # Runtime directories
 # ---------------------------------------------------------------------------
 
@@ -347,7 +380,8 @@ IMPORT_REPORT="$("$PYTHON" - <<'PYEOF'
 mods = [("flask", "web dashboard"), ("numpy", "motion detection"),
         ("simplejpeg", "preview encoding"), ("PIL", "still images"),
         ("av", "decoding video for OCR")]
-optional = [("picamera2", "live Pi camera"), ("cv2", "better OCR preprocessing"),
+optional = [("picamera2", "live Pi (CSI) camera"),
+            ("cv2", "USB cameras + better OCR preprocessing"),
             ("easyocr", "bib OCR"), ("pytesseract", "bib OCR")]
 missing = []
 for name, why in mods:
@@ -496,9 +530,10 @@ fi
 if [ "$IS_PI" -eq 0 ]; then
 cat <<EOF
 
-    ${YEL}This machine has no Raspberry Pi camera, so the app runs with its mock
-    camera.${RST}  Use it to play back recordings copied from a Pi, work the
-    motion timeline and run OCR.  Copy a race in with:
+    ${BOLD}Camera:${RST} plug in a USB camera, then choose it in Settings -> Camera
+    (press Rescan if it was connected after the page loaded).  With no camera
+    attached the app runs its mock scene, which is still enough to play back a
+    race copied from a Pi and run the OCR over it:
 
         rsync -a pi@<pi-address>:~/finish_line_camera/recordings/ $PROJECT_DIR/recordings/
 EOF

@@ -1,7 +1,8 @@
 # 🏁 Finish Line Recorder
 
 A "mobile CCTV" finish-line camera for running / cycling races, built for a
-**Raspberry Pi 5 + Camera Module 3**.
+**Raspberry Pi 5 + Camera Module 3** and equally happy on an ordinary Linux PC
+with a **USB camera**.
 
 Press **REC** and it records continuously (a loop with a storage cap), full
 field of view at up to 50 fps.  Afterwards - or at any time during the race -
@@ -49,6 +50,11 @@ a batch from the video.
 - **OCR waits while recording** by default, so PyTorch never steals the CPU
   the software encoder needs.  A never-dropping backlog survives restarts.
 - **Events** - recordings, stills and results are grouped per race / day.
+- **Camera sources** - a Raspberry Pi camera on the ribbon cable, any USB /
+  V4L2 camera (webcam, capture card), or the built-in mock. When more than one
+  is connected, pick the one to use from a dropdown in Settings; the modes on
+  offer are enumerated from the chosen device, so a webcam is only ever asked
+  for resolutions and frame rates it can actually deliver.
 - **Mock camera** - the whole app runs with no camera for development.
 
 ---
@@ -88,7 +94,9 @@ finish_line_camera/
 └── app/
     ├── config.py           # static defaults (record modes, OCR tuning, paths)
     ├── settings.py         # persisted user settings (data/settings.json)
-    ├── camera_manager.py   # picamera2 / mock; YUV420 frames; motion in the loop
+    ├── camera_manager.py   # Pi / USB / mock backends; YUV420 frames; motion in the loop
+    ├── cameras.py          # which cameras exist, and which one to use
+    ├── v4l2.py             # USB camera + mode enumeration (ioctl, no extra deps)
     ├── recorder.py         # ffmpeg segment pipeline, sidecars, storage cap
     ├── extractor.py        # video → stills jobs; exact-frame decode
     ├── ocr_service.py      # OCR backlog worker + still saving
@@ -145,10 +153,14 @@ compiled against the system NumPy and a pip copy of it in the same environment
 breaks the camera.  The virtualenv is created with `--system-site-packages` so
 it can still see them.
 
-**Any other Linux PC** (Debian, Ubuntu, Fedora, Arch, openSUSE) - there is no
-picamera2 backend off a Pi, so the app starts with its built-in **mock camera**
-and says so in the header.  Live capture does not work, but everything else
-does, which makes a laptop or desktop a genuinely useful second machine:
+**Any other Linux PC** (Debian, Ubuntu, Fedora, Arch, openSUSE) - the same
+system, driven by a **USB camera**: any V4L2 device, so a webcam or an HDMI
+capture card both work. Live capture, recording, the motion timeline, playback
+and OCR all behave as they do on the Pi. There is no picamera2 backend off a
+Pi, so the ribbon-cable camera is Pi-only.
+
+With no camera attached the app falls back to the mock and says so in the
+header, which still makes a laptop a useful second machine for a race:
 
 - play back recordings copied over from the Pi, with the full motion timeline,
   frame stepping and zoom,
@@ -172,6 +184,38 @@ package sets for both cases and `install.sh` is readable top to bottom.
 .venv/bin/python run.py                                   # normal
 .venv/bin/python run.py --mock --port 8001 --root /tmp/fl-test --no-ocr   # dev
 ```
+
+---
+
+## Choosing a camera
+
+Settings -> **Camera** lists every source found: Pi cameras on the ribbon
+cable, USB / V4L2 devices, and the mock. **Auto** (the default) picks a Pi
+camera if one is attached, otherwise a USB camera, otherwise the mock, so an
+existing install keeps behaving exactly as it did. **Rescan** re-checks the
+devices without reloading the page.
+
+Changing camera restarts the capture pipeline, so it is refused while
+recording. Press **Apply camera settings** to make the change live.
+
+The **Mode** dropdown follows the camera. A Pi camera offers the presets in
+`config.RECORD_MODES`; a USB camera offers what the device itself reports
+through V4L2, so you are never offered a resolution or frame rate it cannot
+produce. Whatever the driver actually grants on open is what gets used and
+recorded, even if it differs from what was asked for.
+
+### One caveat that matters for timing
+
+A Pi camera stamps each frame with the sensor's own exposure clock, so a
+recorded finish time is the moment the shutter opened.
+
+A USB camera gives no such clock, so a frame is stamped when it arrives at the
+application, after USB transfer and MJPEG decode. Expect a consistent offset of
+roughly one frame period. For placing finishers in order this makes no
+difference; for absolute times against an external clock, it does.
+
+USB cameras also have no controllable focus, so the Focus panel dims out when
+one is selected.
 
 ---
 
@@ -265,12 +309,23 @@ repo are the hand-written originals from the first Pi, kept for reference.
 ## Camera not detected?
 
 The app falls back to the mock camera and says so in the header ("mock
-camera").  On a Pi, check `rpicam-hello --list-cameras`, the ribbon cable, and
-`journalctl -u finish-line.service`.
+camera").  Settings -> **Camera** lists everything found; press **Rescan** if
+the camera was plugged in after the page loaded.
 
-On a non-Pi Linux PC this is expected and permanent: there is no picamera2
-backend, so the mock camera is what you get.  Playback and OCR of recordings
-copied from a Pi work normally.
+For a **USB camera**, in order of likelihood:
+
+1. The service user is not in the `video` group, so `/dev/video*` cannot be
+   opened.  `install.sh` fixes this; after it runs the first time you need to
+   log out and back in, or restart the service.
+2. OpenCV is missing.  `pip install opencv-python-headless`, or
+   `sudo apt install python3-opencv`.
+3. Another program already has the camera open. Only one at a time.
+4. The camera really does not offer a format we can decode.  `v4l2-ctl
+   --list-formats-ext -d /dev/videoN` shows what it does offer; MJPG or YUYV
+   is what you want to see.
+
+For a **Pi camera**, check `rpicam-hello --list-cameras`, the ribbon cable, and
+`journalctl -u finish-line.service`.
 
 ## GPIO (optional)
 

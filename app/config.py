@@ -68,11 +68,25 @@ OCR_STATE_PATH = DATA_DIR / "ocr.json"
 # Camera + recording
 # ---------------------------------------------------------------------------
 
-# USE_MOCK_CAMERA controls which camera backend is used:
-#   "auto"  -> try the real Picamera2; if it is unavailable fall back to mock
+# USE_MOCK_CAMERA is the legacy master switch, kept so existing installs keep
+# behaving as they did:
+#   "auto"  -> the "camera_id" setting decides (this is what you want)
 #   True    -> always use the synthetic mock camera (handy for development)
-#   False   -> always use the real camera (raise an error if it is missing)
+#   False   -> never use the mock; always pick a real camera
 USE_MOCK_CAMERA = "auto"
+
+# Which camera to record from is a user setting, not a constant - see
+# DEFAULT_SETTINGS["camera_id"] below and app/cameras.py.  Three kinds exist:
+#   "csi:0"             a Raspberry Pi camera on the ribbon cable (Picamera2)
+#   "usb:/dev/video2"   any V4L2 camera: a USB webcam, a capture card
+#   "mock"              the built-in synthetic scene
+#   "auto"              Pi camera if present, else USB, else mock
+
+# Image orientation for USB cameras.  Separate from the CAMERA_HFLIP/VFLIP pair
+# below, which exist because this particular Camera Module 3 is mounted upside
+# down; a webcam sitting on a tripod normally needs no flip at all.
+USB_HFLIP = False
+USB_VFLIP = False
 
 # Recording modes.  The Raspberry Pi 5 has NO hardware video encoder, so H.264
 # is encoded in software (libx264 "ultrafast", all four cores).  Measured on
@@ -103,8 +117,16 @@ RECORD_MODES = {
 # Defaults for everything the Settings tab can change.  These are only used
 # the first time (or for keys missing from data/settings.json).
 DEFAULT_SETTINGS = {
+    # Camera source
+    "camera_id": "auto",            # "auto" | "csi:N" | "usb:/dev/videoN" | "mock"
+    # Mode for a USB camera, as "FOURCC:WIDTHxHEIGHT@FPS".  Unlike the Pi
+    # presets below, the real list is enumerated from the device itself
+    # (app/v4l2.py), because a webcam can only offer what its firmware
+    # supports.  This default is the one combination virtually every USB
+    # camera can manage.
+    "usb_mode": "MJPG:1280x720@30",
     # Recording
-    "record_mode": "2k50",          # key into RECORD_MODES
+    "record_mode": "2k50",          # key into RECORD_MODES (Raspberry Pi camera)
     "record_crf": 20,               # libx264 constant quality: lower = better/bigger (14-30)
     "segment_seconds": 60,          # MP4 segment length; also the storage-cap granularity
     "storage_cap_gb": 100.0,        # ring buffer: oldest segments deleted beyond this

@@ -201,7 +201,11 @@
 
             <div class="card">
                 <h2>Camera &amp; recording</h2>
-                <p class="hint">The Pi 5 encodes H.264 in software, so resolution and frame rate trade off against each other. Changing these restarts the camera (not possible while recording).</p>
+                <p class="hint">Changing any of these restarts the camera (not possible while recording).</p>
+                <div class="field"><label for="s-camera">Camera</label>
+                    <select id="s-camera"></select>
+                    <button id="s-camera-rescan" type="button" title="Look for cameras plugged in since the page loaded">Rescan</button></div>
+                <p id="s-camera-note" class="hint"></p>
                 <div class="field"><label for="s-record-mode">Mode</label><select id="s-record-mode"></select></div>
                 <p id="s-mode-note" class="hint"></p>
                 <div class="field"><label for="s-record-crf">Quality (CRF)</label>

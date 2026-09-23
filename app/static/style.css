@@ -250,6 +250,10 @@ td .jump { font-size: 0.75rem; margin-left: 0.3rem; padding: 0.05rem 0.4rem; }
 .card h2 { font-size: 0.95rem; margin: 0 0 0.5rem; }
 .card h3 { font-size: 0.82rem; margin: 0.7rem 0 0.3rem; color: var(--muted); }
 .card p { margin: 0.2rem 0 0.5rem; }
+/* A panel that does not apply to the camera in use (e.g. focus on a
+   fixed-lens webcam): dimmed and inert, but still readable. */
+.card.disabled { opacity: 0.45; }
+.card.disabled input, .card.disabled select, .card.disabled button { pointer-events: none; }
 .field { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin: 0.4rem 0; font-size: 0.85rem; }
 .field > label:first-child { color: var(--muted); min-width: 9.5em; }
 .field input[type="range"] { flex: 1; min-width: 90px; max-width: 220px; }

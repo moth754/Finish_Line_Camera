@@ -13,12 +13,63 @@
     let modes = [];
     let settings = {};
     let diskTimer = null;
+    // Which setting the Mode dropdown writes to: "record_mode" for the Pi
+    // camera's presets, "usb_mode" for the modes a webcam reports itself.
+    let modeSetting = "record_mode";
+    let cameras = [];
 
     function modeByKey(k) { return modes.find((m) => m.key === k); }
+
+    function fillCameras(list, selected) {
+        cameras = list || [];
+        const sel = $("#s-camera");
+        sel.innerHTML = "";
+        const auto = document.createElement("option");
+        auto.value = "auto";
+        auto.textContent = "Auto (use whatever is connected)";
+        sel.appendChild(auto);
+        for (const c of cameras) {
+            const opt = document.createElement("option");
+            opt.value = c.id;
+            const kind = c.kind === "usb" ? "USB" : (c.kind === "csi" ? "Pi" : "");
+            opt.textContent = kind ? `${kind}: ${c.name}` : c.name;
+            sel.appendChild(opt);
+        }
+        // A camera saved while it was plugged in may no longer be listed;
+        // keep showing it rather than silently snapping to something else.
+        if (selected && selected !== "auto" && !cameras.some((c) => c.id === selected)) {
+            const missing = document.createElement("option");
+            missing.value = selected;
+            missing.textContent = `${selected} (not connected)`;
+            sel.appendChild(missing);
+        }
+        sel.value = selected || "auto";
+    }
+
+    function showCameraNote(p) {
+        const chosen = $("#s-camera").value;
+        const entry = cameras.find((c) => c.id === (chosen === "auto" ? p.resolved_camera : chosen));
+        const bits = [];
+        if (chosen === "auto" && p.resolved_camera) {
+            const auto = cameras.find((c) => c.id === p.resolved_camera);
+            bits.push(`currently resolves to ${auto ? auto.name : p.resolved_camera}`);
+        }
+        if (entry && entry.detail) bits.push(entry.detail);
+        if (entry && entry.kind === "usb") {
+            bits.push("frame times are arrival times, about one frame later than the sensor");
+        }
+        if (entry && entry.kind === "mock") {
+            bits.push("synthetic picture - nothing is really being filmed");
+        }
+        $("#s-camera-note").textContent = bits.join(" · ");
+    }
 
     function fillFromPayload(p) {
         settings = p.settings;
         modes = p.modes;
+        modeSetting = p.mode_setting || "record_mode";
+        fillCameras(p.cameras, settings.camera_id);
+        showCameraNote(p);
         const sel = $("#s-record-mode");
         sel.innerHTML = "";
         for (const m of modes) {
@@ -27,7 +78,12 @@
             opt.textContent = m.label;
             sel.appendChild(opt);
         }
-        sel.value = settings.record_mode;
+        if (!modes.length) {
+            const opt = document.createElement("option");
+            opt.textContent = "no modes reported by this camera";
+            sel.appendChild(opt);
+        }
+        sel.value = p.wanted_mode;
         showModeNote();
         $("#s-record-crf").value = settings.record_crf;
         $("#s-record-crf-val").textContent = settings.record_crf;
@@ -40,24 +96,29 @@
         $("#s-extract-motion").checked = !!settings.extract_motion_only;
         $("#s-extract-maxfps").value = settings.extract_max_fps;
         $("#s-extract-dedup").value = (settings.extract_dedup * 100).toFixed(1).replace(/\.0$/, "");
-        describeCamera(p.camera);
+        describeCamera(p.camera, p.camera_matches, p.wanted_mode);
     }
 
     function showModeNote() {
         const m = modeByKey($("#s-record-mode").value);
-        $("#s-mode-note").textContent = m ? m.note : "";
+        $("#s-mode-note").textContent = (m && m.note) ? m.note : "";
     }
 
-    function describeCamera(c) {
-        const wanted = modeByKey(settings.record_mode);
-        const same = c.mode === settings.record_mode
-            && (c.preview_size[0] === settings.preview_width
-                || c.preview_size[0] === c.record_size[0]);
+    function describeCamera(c, matches, wantedMode) {
+        const wanted = modeByKey(wantedMode);
         $("#s-camera-state").textContent =
-            `camera now: ${c.record_size[0]}×${c.record_size[1]} @ ${c.fps} fps, `
+            `camera now: ${c.camera_name || c.camera_type} — `
+            + `${c.record_size[0]}×${c.record_size[1]} @ ${c.fps} fps, `
             + `preview ${c.preview_size[0]}×${c.preview_size[1]}`
-            + (same ? "" : ` — press Apply to switch to ${wanted ? wanted.label : settings.record_mode}`);
-        $("#s-camera-apply").classList.toggle("primary", !same);
+            + (matches ? "" : ` — press Apply to switch to ${wanted ? wanted.label : wantedMode}`);
+        $("#s-camera-apply").classList.toggle("primary", !matches);
+        // The focus panel only means anything on a camera with a movable lens.
+        const focusCard = $("#focus-mode") && $("#focus-mode").closest(".card");
+        if (focusCard) {
+            focusCard.classList.toggle("disabled", !c.supports_focus);
+            focusCard.title = c.supports_focus
+                ? "" : "This camera has no controllable focus";
+        }
     }
 
     async function save(changes) {
@@ -75,7 +136,19 @@
     // --- camera & recording -------------------------------------------------
     $("#s-record-mode").addEventListener("change", () => {
         showModeNote();
-        save({ record_mode: $("#s-record-mode").value });
+        save({ [modeSetting]: $("#s-record-mode").value });
+    });
+    $("#s-camera").addEventListener("change", () => {
+        // Switching camera changes which modes exist, so reload the whole
+        // payload rather than patching the dropdown in place.
+        save({ camera_id: $("#s-camera").value });
+    });
+    $("#s-camera-rescan").addEventListener("click", async () => {
+        try {
+            await App.api("/api/cameras");     // forces a fresh device scan
+            await load();
+            App.toast("Camera list refreshed");
+        } catch (e) { App.toast("Rescan failed: " + e.message, true); }
     });
     $("#s-record-crf").addEventListener("input", () => {
         $("#s-record-crf-val").textContent = $("#s-record-crf").value;

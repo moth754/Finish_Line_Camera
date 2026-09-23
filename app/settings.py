@@ -21,6 +21,11 @@ from . import config
 
 # (type, minimum, maximum) or (type, allowed-values) per key.  None = no bound.
 _RULES = {
+    # The set of valid cameras and USB modes depends on what is plugged in,
+    # so these are free-form strings checked for shape rather than membership;
+    # camera_manager falls back gracefully if the value no longer resolves.
+    "camera_id":           ("str", 64),
+    "usb_mode":            ("str", 64),
     "record_mode":         ("choice", tuple(config.RECORD_MODES.keys())),
     "record_crf":          ("int", 14, 30),
     "segment_seconds":     ("int", 10, 600),
@@ -79,6 +84,20 @@ class Settings:
             if isinstance(value, str):
                 return value.strip().lower() in ("1", "true", "yes", "on")
             return bool(value)
+        if kind == "str":
+            v = str(value).strip()
+            if not v or len(v) > rule[1]:
+                raise ValueError(f"{key} must be 1-{rule[1]} characters")
+            # Keep it to the character set the ids and mode keys actually use,
+            # so nothing odd can reach a device path or a settings file.
+            if not all(c.isalnum() or c in "_-.:/@x" for c in v):
+                raise ValueError(f"{key} contains unexpected characters")
+            # A camera id carries a device path; never let one walk the tree.
+            # (camera_manager only ever uses ids it enumerated itself, so this
+            # is a second line of defence rather than the only one.)
+            if ".." in v:
+                raise ValueError(f"{key} must not contain '..'")
+            return v
         if kind == "choice":
             allowed = rule[1]
             # Allow "1280" for an int choice, etc.
