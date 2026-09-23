@@ -1,0 +1,33 @@
+# ---------------------------------------------------------------------------
+# Runtime media and state - never committed.
+#
+# These directories are recreated by install.sh (and by run.py on first start).
+# They hold gigabytes of video and the local race database, all of which is
+# specific to one machine and one race day.
+# ---------------------------------------------------------------------------
+
+# Continuous H.264 recordings: rec_<time>/seg_NNNNNN.mp4 + .json sidecars.
+recordings/
+
+# JPEG stills: snapshots and frames extracted from video for OCR.
+captures/
+
+# SQLite database and the persisted JSON state (settings, ROI, focus, motion, OCR).
+data/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# --- Logs ---
+*.log
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+*.swp
+.DS_Store

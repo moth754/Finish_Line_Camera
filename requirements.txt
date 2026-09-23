@@ -1,0 +1,53 @@
+# Python dependencies for the Finish Line Recorder.
+#
+# The easiest route is ./install.sh, which picks the right set for the machine
+# it runs on.  This file is the manual equivalent.
+#
+# ---------------------------------------------------------------------------
+# On a RASPBERRY PI, do NOT pip-install numpy/Pillow/simplejpeg/av.
+# picamera2 is an apt package compiled against the system NumPy, and a pip copy
+# in the same environment breaks the camera.  Install the stack from apt:
+#
+#     sudo apt install -y python3-picamera2 python3-libcamera python3-av \
+#                         python3-numpy python3-pil python3-simplejpeg \
+#                         python3-opencv ffmpeg
+#     python3 -m venv --system-site-packages .venv
+#     .venv/bin/pip install Flask easyocr
+#
+# On ANY OTHER LINUX PC there is no Pi camera backend, so the app runs with its
+# built-in mock camera: playback, the motion timeline and OCR all work, live
+# capture does not.  Install everything from pip:
+#
+#     sudo apt install -y ffmpeg          # or dnf/pacman equivalent
+#     python3 -m venv .venv
+#     .venv/bin/pip install -r requirements.txt
+# ---------------------------------------------------------------------------
+
+# --- Required: the app will not start without these ---
+Flask>=3.0
+numpy>=1.24            # motion detection, frame handling
+Pillow>=10.0           # still images
+simplejpeg>=1.6        # fast JPEG encoding (live preview + snapshots)
+av>=11.0               # PyAV: decodes recorded video to extract frames for OCR
+
+# --- Strongly recommended ---
+opencv-python-headless>=4.8   # better OCR preprocessing; falls back to NumPy/Pillow
+
+# --- OCR backend: pick ONE (or neither, for recording/playback only) ---
+#
+# EasyOCR (default, set in app/config.py as OCR_BACKEND = "easyocr").
+# Reads real race bibs far better than Tesseract, which misreads numbers
+# surrounded by event text and sponsor logos.  Pulls in PyTorch.
+# Install the CPU-only PyTorch first to avoid multi-GB CUDA wheels:
+#     pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+easyocr>=1.7
+
+# Tesseract (lighter, much weaker on real bibs).  Also needs the binary:
+#     sudo apt install tesseract-ocr
+# and OCR_BACKEND = "tesseract" in app/config.py.
+# pytesseract>=0.3.10
+
+# --- Not installable from pip (system packages) ---
+#   ffmpeg + ffprobe   H.264 encoding and segmenting          (apt: ffmpeg)
+#   picamera2          Raspberry Pi camera                    (apt: python3-picamera2)
+#   libcamera          used by picamera2                      (apt: python3-libcamera)

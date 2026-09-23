@@ -1,0 +1,18 @@
+# finish-line-shutdown.sudoers
+# =============================
+# Lets the finish-line service user (dartdata) power the Pi off from the
+# dashboard without a password.  The dashboard already requires TWO "are you
+# sure?" confirmations before it calls shutdown, so this only grants the one
+# specific command - nothing else.
+#
+# Install (one time):
+#   sudo cp /home/dartdata/finish_line_camera/finish-line-shutdown.sudoers \
+#           /etc/sudoers.d/finish-line-shutdown
+#   sudo chmod 440 /etc/sudoers.d/finish-line-shutdown
+#   sudo visudo -cf /etc/sudoers.d/finish-line-shutdown   # should say "parsed OK"
+#
+# After that the dashboard's "Shut down" button works.  No service restart
+# needed for the sudoers rule itself (but you DO need to restart the service
+# once to pick up the new shutdown code).
+
+dartdata ALL=(root) NOPASSWD: /usr/sbin/shutdown

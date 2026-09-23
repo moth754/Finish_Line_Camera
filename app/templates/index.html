@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<!--
+  index.html
+  ==========
+  Single-page app with four tabs:
+
+    Live      big live preview; drag a box to set the motion zone; REC button
+    Playback  recorded video with a motion timeline, transport, speed, zoom,
+              IN/OUT range -> "send to OCR", "send snapshot to OCR"
+    Results   one row per bib read (from stills cut out of the video), photo
+              viewer, search / filter / export, OCR worker controls + jobs
+    Settings  camera mode (resolution / fps), quality, storage cap, preview,
+              focus, motion sensitivity, OCR options, events, system
+
+  Behaviour lives in static/app.js (core) + live.js / playback.js /
+  results.js / settings.js; styling in static/style.css.
+-->
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Finish Line Recorder</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+    <div class="brand">🏁 Finish Line</div>
+
+    <nav class="tabs" id="tabs">
+        <button type="button" class="tab-btn active" data-tab="live">Live</button>
+        <button type="button" class="tab-btn" data-tab="playback">Playback</button>
+        <button type="button" class="tab-btn" data-tab="results">Results</button>
+        <button type="button" class="tab-btn" data-tab="settings">Settings</button>
+    </nav>
+
+    <!-- Recording control: the one button that matters on race day. -->
+    <div class="rec-group">
+        <button id="rec-btn" type="button" class="rec-btn">● REC</button>
+        <span id="rec-info" class="rec-info"></span>
+    </div>
+
+    <div class="event-controls">
+        <label for="event-select">Event</label>
+        <select id="event-select" title="Current event"></select>
+        <button id="event-new" type="button" title="Create a new event">+ New</button>
+    </div>
+
+    <div class="chips">
+        <span id="chip-storage" class="chip" title="Video storage used / cap"></span>
+        <span id="chip-ocr" class="chip" title="Stills waiting for bib recognition" hidden></span>
+        <span id="chip-conn" class="chip status">connecting…</span>
+    </div>
+</header>
+
+<main>
+    <!-- ============================ LIVE ============================ -->
+    <section id="tab-live" class="tab active">
+        <div class="toolbar">
+            <span class="hint">Drag on the picture to set the motion zone (used for the timeline and for picking frames to OCR)</span>
+            <button id="roi-reset" type="button">Reset zone</button>
+            <label class="inline"><input id="roi-show" type="checkbox" checked> show zone</label>
+            <span id="motion-live" class="motion-live">motion –</span>
+            <span class="spacer"></span>
+            <span id="live-res" class="hint"></span>
+            <button id="snapshot-btn" type="button" class="primary" title="Save the current full-resolution frame as a still and read bib numbers from it">📷 Snapshot → OCR</button>
+        </div>
+        <div id="live-wrap" class="live-wrap">
+            <img id="live" src="{{ url_for('video_feed') }}" alt="live feed">
+            <canvas id="roi-canvas"></canvas>
+        </div>
+    </section>
+
+    <!-- ========================== PLAYBACK ========================== -->
+    <section id="tab-playback" class="tab">
+        <div class="toolbar">
+            <label class="inline">Recording
+                <select id="pb-rec-select"></select>
+            </label>
+            <span id="pb-rec-info" class="hint"></span>
+            <button id="pb-refresh" type="button" title="Reload the recording list">↻</button>
+            <span class="spacer"></span>
+            <button id="pb-delete" type="button" class="danger" title="Delete this recording's video files">Delete recording</button>
+        </div>
+
+        <div id="pb-stage" class="pb-stage">
+            <div id="pb-zoom" class="pb-zoom">
+                <video id="pb-video" playsinline muted preload="auto"></video>
+            </div>
+            <div class="pb-clock-wrap"><span id="pb-clock" class="pb-clock">--:--:--.---</span><span id="pb-date" class="pb-date"></span></div>
+            <div class="pb-zoom-ctl">
+                <button id="zoom-out" type="button" title="Zoom out">−</button>
+                <span id="zoom-val">fit</span>
+                <button id="zoom-in" type="button" title="Zoom in">+</button>
+                <button id="zoom-reset" type="button" title="Fit to screen">fit</button>
+            </div>
+            <div id="pb-empty" class="pb-empty">No recording selected. Press REC on the Live tab to start one.</div>
+        </div>
+
+        <div class="pb-timeline-wrap">
+            <canvas id="pb-timeline"></canvas>
+            <div class="pb-timeline-labels">
+                <span id="tl-start"></span>
+                <span class="hint">click: seek / open recording · wheel or − / +: zoom · drag: pan · drag [ ] to set range · green = video recorded · red = motion in zone</span>
+                <span class="pb-tl-right">
+                    <span class="pb-tl-ctl">
+                        <button id="tl-zoom-out" type="button" title="Zoom timeline out (show more time)">−</button>
+                        <span id="tl-span" title="Time shown across the timeline">–</span>
+                        <button id="tl-zoom-in" type="button" title="Zoom timeline in (show less time)">+</button>
+                        <button id="tl-zoom-fit" type="button" title="Fit the whole recording">fit</button>
+                    </span>
+                    <span id="tl-end"></span>
+                </span>
+            </div>
+        </div>
+
+        <div class="pb-controls">
+            <button id="pb-back10" type="button" title="Back 10 s">−10s</button>
+            <button id="pb-back1" type="button" title="Back 1 s">−1s</button>
+            <button id="pb-prev" type="button" title="Previous frame">◀ frame</button>
+            <button id="pb-play" type="button" class="primary big" title="Play / pause (space)">▶</button>
+            <button id="pb-next" type="button" title="Next frame">frame ▶</button>
+            <button id="pb-fwd1" type="button" title="Forward 1 s">+1s</button>
+            <button id="pb-fwd10" type="button" title="Forward 10 s">+10s</button>
+            <label class="inline">Speed
+                <select id="pb-speed">
+                    <option value="0.1">0.1×</option>
+                    <option value="0.25">0.25×</option>
+                    <option value="0.5">0.5×</option>
+                    <option value="1" selected>1×</option>
+                    <option value="2">2×</option>
+                    <option value="4">4×</option>
+                    <option value="8">8×</option>
+                </select>
+            </label>
+            <button id="pb-live-btn" type="button" title="Jump to the newest video">⏭ newest</button>
+            <span class="spacer"></span>
+            <button id="pb-mark-in" type="button" title="Set range start at the current time">[ IN</button>
+            <button id="pb-mark-out" type="button" title="Set range end at the current time">OUT ]</button>
+            <span id="pb-range-text" class="hint">no range set</span>
+        </div>
+
+        <div class="pb-ocr-panel">
+            <div class="pb-ocr-form">
+                <strong>Send snapshot to OCR</strong>
+                <button id="pb-frame-ocr" type="button" class="primary" title="Cut the exact frame on screen out of the video and read bib numbers from it">📷 Send snapshot</button>
+                <span class="hint">just the frame on screen – pause and use ◀ frame / frame ▶ to pick it; the read shows up in the Results tab</span>
+                <span id="pb-frame-ocr-status" class="hint"></span>
+            </div>
+            <div class="pb-ocr-form">
+                <strong>Send range to OCR</strong>
+                <label class="inline"><input id="job-motion" type="checkbox" checked> only frames with motion in the zone</label>
+                <label class="inline">max <input id="job-maxfps" type="number" value="2" min="0.1" max="120" step="0.5"> frames/s</label>
+                <label class="inline">skip near-duplicates <input id="job-dedup" type="number" value="2" min="0" max="50" step="0.5">%</label>
+                <button id="job-submit" type="button" class="primary">Send to OCR</button>
+                <span id="job-hint" class="hint">Set IN and OUT first (or leave unset to send the whole recording).</span>
+            </div>
+            <div id="job-list" class="job-list"></div>
+        </div>
+    </section>
+
+    <!-- =========================== RESULTS =========================== -->
+    <section id="tab-results" class="tab">
+        <div class="toolbar">
+            <span id="ocr-worker-state" class="chip"></span>
+            <button id="ocr-pause-btn" type="button">⏸ Pause OCR</button>
+            <span id="ocr-rate" class="hint"></span>
+            <span class="spacer"></span>
+            <input id="search" type="search" placeholder="Search bib…" autocomplete="off">
+            <select id="filter-mode" title="Filter rows">
+                <option value="all">All</option>
+                <option value="with_bib">With bib</option>
+                <option value="without_bib">No bib</option>
+            </select>
+            <label class="inline">conf ≥ <input id="min-conf" type="number" min="0" max="100" step="5" value="0">%</label>
+            <button id="export-btn" type="button" title="Download matching rows as CSV">Export CSV</button>
+            <button id="purge-btn" type="button" class="danger" title="Delete ALL stills and OCR records for the current event (video is kept)">Purge stills</button>
+        </div>
+        <div class="results-grid">
+            <div class="pane">
+                <div class="pane-head"><h2>Detections</h2><span class="hint" id="row-count"></span></div>
+                <div class="table-scroll">
+                    <table id="results">
+                        <thead><tr><th>Bib</th><th>Confidence</th><th>Time</th><th>Source</th></tr></thead>
+                        <tbody id="results-body"></tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="pane">
+                <div class="pane-head"><h2>Photo</h2><span class="hint" id="viewer-caption"></span></div>
+                <div class="viewer-wrap">
+                    <img id="viewer" alt="select a row to view its photo">
+                    <p id="viewer-empty" class="empty">Select a row to view its photo.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- =========================== SETTINGS =========================== -->
+    <section id="tab-settings" class="tab">
+        <div class="settings-grid">
+
+            <div class="card">
+                <h2>Camera &amp; recording</h2>
+                <p class="hint">The Pi 5 encodes H.264 in software, so resolution and frame rate trade off against each other. Changing these restarts the camera (not possible while recording).</p>
+                <div class="field"><label for="s-record-mode">Mode</label><select id="s-record-mode"></select></div>
+                <p id="s-mode-note" class="hint"></p>
+                <div class="field"><label for="s-record-crf">Quality (CRF)</label>
+                    <input id="s-record-crf" type="range" min="14" max="30" step="1">
+                    <span id="s-record-crf-val" class="val"></span>
+                    <span class="hint">lower = sharper &amp; bigger files · 20 is a good default</span></div>
+                <div class="field"><label for="s-preview-width">Live preview</label>
+                    <select id="s-preview-width">
+                        <option value="640">640×360</option>
+                        <option value="960">960×540</option>
+                        <option value="1280">1280×720</option>
+                        <option value="1920">1920×1080</option>
+                    </select>
+                    <input id="s-preview-fps" type="number" min="1" max="30" step="1"> fps
+                    <span class="hint">bigger / faster preview costs CPU &amp; Wi-Fi</span></div>
+                <div class="field"><button id="s-camera-apply" type="button" class="primary">Apply camera settings</button>
+                    <span id="s-camera-state" class="hint"></span></div>
+            </div>
+
+            <div class="card">
+                <h2>Focus</h2>
+                <div class="field"><label for="focus-mode">Mode</label>
+                    <select id="focus-mode">
+                        <option value="manual">Manual (fixed distance)</option>
+                        <option value="continuous">Autofocus</option>
+                    </select>
+                    <span id="focus-distance-wrap"><input id="focus-distance" type="number" min="0.1" max="100" step="0.1" value="6"> m</span>
+                    <button id="focus-apply" type="button">Apply</button>
+                    <span class="hint" id="focus-current"></span></div>
+                <p class="hint">Fixed focus at the finish-line distance can never hunt at the critical moment.</p>
+            </div>
+
+            <div class="card">
+                <h2>Motion zone</h2>
+                <div class="field"><label for="motion-threshold">Sensitivity</label>
+                    <input id="motion-threshold" type="range" min="0.1" max="20" step="0.1" value="2">
+                    <span class="val"><span id="motion-threshold-val">2.0</span>%</span>
+                    <span class="hint">of the zone must change to count as motion (live readout on the Live tab)</span></div>
+            </div>
+
+            <div class="card">
+                <h2>Storage</h2>
+                <div class="field"><label for="s-storage-cap">Max video storage</label>
+                    <input id="s-storage-cap" type="number" min="1" max="100000" step="1"> GB
+                    <span class="hint">oldest segments are deleted beyond this (continuous loop)</span></div>
+                <div class="field"><label for="s-min-free">Keep free</label>
+                    <input id="s-min-free" type="number" min="0.5" max="1000" step="0.5"> GB</div>
+                <div class="field"><label for="s-segment">Segment length</label>
+                    <input id="s-segment" type="number" min="10" max="600" step="10"> s
+                    <span class="hint">each MP4 file; also the deletion granularity</span></div>
+                <div id="s-storage-info" class="hint"></div>
+                <div class="disk-bar"><div class="disk-seg disk-video" id="disk-video"></div><div class="disk-seg disk-stills" id="disk-stills"></div><div class="disk-seg disk-used" id="disk-used"></div></div>
+            </div>
+
+            <div class="card">
+                <h2>OCR</h2>
+                <div class="field"><label for="ocr-panels">Panel detection</label>
+                    <label class="switch"><input id="ocr-panels" type="checkbox"><span class="track"></span></label>
+                    <span class="hint">on = catches low-contrast number boards · off = faster</span></div>
+                <div class="field"><label for="detect-width">Detect resolution</label>
+                    <input id="detect-width" type="range" min="640" max="1920" step="160">
+                    <span class="val"><span id="detect-width-val"></span> px</span>
+                    <span class="hint">lower = faster, may miss small bibs</span></div>
+                <div class="field"><label for="s-ocr-while-rec">OCR while recording</label>
+                    <label class="switch"><input id="s-ocr-while-rec" type="checkbox"><span class="track"></span></label>
+                    <span class="hint">off (recommended): the OCR worker waits until you stop recording, so the encoder keeps every frame</span></div>
+                <h3>Defaults when sending video to OCR</h3>
+                <div class="field"><label for="s-extract-motion">Motion only</label>
+                    <label class="switch"><input id="s-extract-motion" type="checkbox"><span class="track"></span></label></div>
+                <div class="field"><label for="s-extract-maxfps">Max frames/s</label>
+                    <input id="s-extract-maxfps" type="number" min="0.1" max="120" step="0.5"></div>
+                <div class="field"><label for="s-extract-dedup">Skip duplicates</label>
+                    <input id="s-extract-dedup" type="number" min="0" max="50" step="0.5"> %
+                    <span class="hint">skip a frame if less than this much of the zone changed since the last kept frame</span></div>
+            </div>
+
+            <div class="card">
+                <h2>Events</h2>
+                <p class="hint">An event (race / day) groups recordings and results. New recordings and stills go to the current event.</p>
+                <div class="field"><label for="s-event-select">Current</label>
+                    <select id="s-event-select"></select>
+                    <button id="s-event-rename" type="button">Rename</button>
+                    <button id="s-event-delete" type="button" class="danger">Delete event</button></div>
+            </div>
+
+            <div class="card">
+                <h2>System</h2>
+                <div id="s-system-info" class="hint"></div>
+                <div class="field">
+                    <button id="restart-btn" type="button">↻ Restart app</button>
+                    <button id="shutdown-btn" type="button" class="danger">⏻ Shut down Pi</button>
+                </div>
+            </div>
+        </div>
+    </section>
+</main>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+<script src="{{ url_for('static', filename='live.js') }}"></script>
+<script src="{{ url_for('static', filename='playback.js') }}"></script>
+<script src="{{ url_for('static', filename='results.js') }}"></script>
+<script src="{{ url_for('static', filename='settings.js') }}"></script>
+</body>
+</html>

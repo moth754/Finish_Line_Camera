@@ -1,0 +1,27 @@
+# systemd service to run the finish-line capture system on boot.
+#
+# 1. Edit the paths/user below to match your install.
+# 2. sudo cp finish-line.service.example /etc/systemd/system/finish-line.service
+# 3. sudo systemctl enable --now finish-line.service
+# 4. journalctl -u finish-line.service -f      # to watch the logs
+
+[Unit]
+Description=Finish Line Capture System
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dartdata
+WorkingDirectory=/home/dartdata/finish_line_camera
+
+# If you used a venv (--system-site-packages), point at its python:
+#   ExecStart=/home/dartdata/finish_line_camera/.venv/bin/python run.py
+# Otherwise use the system python:
+ExecStart=/usr/bin/python3 run.py
+
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
